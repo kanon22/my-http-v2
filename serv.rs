@@ -5,12 +5,6 @@ use std::ffi::OsStr;
 use std::env;
 use std::net::{TcpListener, TcpStream};
 
-struct Header {
-    method: String,
-    uri: String,
-    version: String,
-}
-
 fn http(stream: &TcpStream) {
     println!("{:?}", stream);
     let mut bufr = io::BufReader::new(stream); // 参照を渡す
@@ -18,12 +12,12 @@ fn http(stream: &TcpStream) {
     let mut line = String::new();
     let mut body = [0; 1024];
 
+    /* リクエストラインの読み込み */
     bufr.read_line(&mut line).expect("failed to read first line");
     let mut params = line.split_whitespace();
     let method = params.next().unwrap();
     let uri = params.next().unwrap();
     let version = params.next().unwrap();
-    //println!("{}, {}, {}", method, uri, version);
 
     bufr.read(&mut body).expect("failed to read");
     // echo
@@ -81,8 +75,8 @@ fn get(bufw: &mut BufWriter<&TcpStream>, uri: &str) -> Result<(), io::Error> {
         let content_type: &[u8];
         match path.extension().and_then(OsStr::to_str) {
             Some("html") => content_type = b"Content-Type: text/html\r\n",
-            Some("png") | Some("ico") => content_type = b"Content-Type: text/png\r\n",
-            Some("jpg") | Some("jpeg") => content_type = b"Content-Type: text/jpeg\r\n",
+            Some("png") | Some("ico") => content_type = b"Content-Type: image/png\r\n",
+            Some("jpg") | Some("jpeg") => content_type = b"Content-Type: image/jpeg\r\n",
             _ => content_type = b"Content-Type: application/octet-stream\r\n",
         }
 
