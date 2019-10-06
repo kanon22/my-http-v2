@@ -7,10 +7,14 @@ use std::env;
 use std::net::{TcpListener, TcpStream};
 
 struct Response <'a> {
-    //status_code: u16,
-    resp_line: &'a[u8],
-    resp_hdr: Option<Vec<&'a[u8]>>,
-    msg_body: Option<&'a[u8]>,
+    resp_line: &'a [u8],
+    resp_hdr: Option<Vec<&'a [u8]>>,
+    msg_body: Option<MessageBody<'a>>, // MessageBodyのライフタイムを明示する
+}
+
+enum MessageBody <'a> {
+    Bytes(&'a [u8]),
+    Uri(&'a str),
 }
 
 fn http(stream: &TcpStream) -> Result<(), io::Error> { // 引数には参照を渡す
@@ -18,10 +22,10 @@ fn http(stream: &TcpStream) -> Result<(), io::Error> { // 引数には参照を�
     let mut bufw = io::BufWriter::new(stream);
     let status_code: u16;
     let resp400 = Response {
-        //status_code: 400,
         resp_line: b"HTTP/1.1 400 Bad Request\r\n",
         resp_hdr: None,
-        msg_body: None
+        msg_body: None,
+        //msg_body: Some(MessageBody::Bytes(b"mohyatarou\r\n")),
     };
 
     /* リクエストライン・リクエストヘッダの読み込み */
@@ -62,7 +66,7 @@ fn http(stream: &TcpStream) -> Result<(), io::Error> { // 引数には参照を�
 
     /* TODO: メッセージボディの読み込み */
 
-    // GET の処理
+    // method ごとに処理を呼び出す
     match method {
         "GET" => {
             status_code = get(&mut bufw, &uri).expect("GET operaton error");
@@ -91,80 +95,95 @@ fn send_response(bufw: &mut BufWriter<&TcpStream>, resp: Response) -> Result<(),
             bufw.write(x)?;
         }
     }
-    if let Some(body) = resp.msg_body {
+    if let Some(MessageBody::Bytes(body)) = resp.msg_body {
         bufw.write(b"\r\n")?;
         bufw.write(body)?;
+    } else if let Some(MessageBody::Uri(uri)) = resp.msg_body {
+        send_file(bufw, uri)?;
     }
     bufw.write(b"\r\n")?;
     bufw.flush()?;
     Ok(())
 }
 
+fn send_file(bufw: &mut BufWriter<&TcpStream>, uri: &str) -> Result<(), io::Error> {
+    let mut buf = [0; 1024];
+    let mut reader = io::BufReader::new(File::open(uri)?);
+
+    bufw.write(b"\r\n")?;
+    loop {
+        match reader.read(&mut buf)? {
+            0 => break,
+            n => {
+                let buf = &buf[..n];
+                bufw.write(&buf)?;
+            }
+        }
+    }
+    bufw.flush()?;
+    Ok(())
+}
+
 fn get(bufw: &mut BufWriter<&TcpStream>, uri: &str) -> Result<u16, io::Error> {
-    let status_line: &[u8];
+    let mut resp = Response {
+        resp_line: b"status line shold be here",
+        resp_hdr: None,
+        msg_body: None,
+    };
+    let mut header: Vec<&[u8]> = Vec::new();
     let status_code: u16;
     let file_uri: &str;
 
     if uri == "/" {
         file_uri = "index.html";
-    }else{
+    } else {
         file_uri = uri.trim_start_matches("/");
     }
 
     /* check file existance */
     let path = Path::new(file_uri);
     if !path.exists() {
-        status_line = b"HTTP/1.1 404 Not Found\r\n";
+        resp.resp_line = b"HTTP/1.1 404 Not Found\r\n";
         status_code = 404;
-        bufw.write(status_line)?;
-        bufw.write(b"\r\n")?;
-        bufw.flush()?;
+        send_response(bufw, resp)?;
         return Ok(status_code);
     }
     let attr = path.metadata()?;
     if !attr.is_file() {
         /* 404 */
-        status_line = b"HTTP/1.1 404 Not Found\r\n";
+        resp.resp_line = b"HTTP/1.1 404 Not Found\r\n";
         status_code = 404;
     } else if attr.permissions().readonly() {
         /* 403 */
-        status_line = b"HTTP/1.1 403 Forbidden\r\n";
+        resp.resp_line = b"HTTP/1.1 403 Forbidden\r\n";
         status_code = 403;
     } else {
         /* 200 */
-        status_line = b"HTTP/1.1 200 OK\r\n";
+        resp.resp_line = b"HTTP/1.1 200 OK\r\n";
         status_code = 200;
     }
-
-    bufw.write(status_line)?;
 
     if status_code == 200 {
         /* detect content-type */
         let content_type: &[u8];
         match path.extension().and_then(OsStr::to_str) {
-            Some("html") => content_type = b"Content-Type: text/html\r\n",
-            Some("png") | Some("ico") => content_type = b"Content-Type: image/png\r\n",
-            Some("jpg") | Some("jpeg") => content_type = b"Content-Type: image/jpeg\r\n",
-            Some("txt") => content_type = b"Content-Type: text/plain\r\n",
-            _ => content_type = b"Content-Type: application/octet-stream\r\n",
+            Some("html") =>
+                content_type = b"Content-Type: text/html\r\n",
+            Some("png") | Some("ico") =>
+                content_type = b"Content-Type: image/png\r\n",
+            Some("jpg") | Some("jpeg") =>
+                content_type = b"Content-Type: image/jpeg\r\n",
+            Some("txt") =>
+                content_type = b"Content-Type: text/plain\r\n",
+            _ =>
+                content_type = b"Content-Type: application/octet-stream\r\n",
         }
-
-        bufw.write(content_type)?;
-
-        bufw.write(b"\r\n")?;
-        let mut buf = [0; 1024];
-        let mut reader = io::BufReader::new(File::open(file_uri)?);
-        loop {
-            match reader.read(&mut buf)? {
-                0 => break,
-                n => {
-                    let buf = &buf[..n];
-                    bufw.write(&buf)?;
-                }
-            }
-        }
+        header.push(content_type);
+        
+        resp.msg_body = Some(MessageBody::Uri(file_uri));
     }
-    bufw.flush()?;
+    resp.resp_hdr = Some(header);
+    send_response(bufw, resp)?;
 
     Ok(status_code)
 }
