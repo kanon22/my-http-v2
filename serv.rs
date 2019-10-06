@@ -1,4 +1,4 @@
-use std::io::{self, BufRead, BufWriter, Read, Write};
+use std::io::{self, BufRead, BufWriter, Read, Write, Error, ErrorKind};
 use std::str;
 use std::fs::File;
 use std::path::Path;
@@ -24,8 +24,8 @@ fn http(stream: &TcpStream) -> Result<(), io::Error> { // 引数には参照を�
     let resp400 = Response {
         resp_line: b"HTTP/1.1 400 Bad Request\r\n",
         resp_hdr: None,
-        msg_body: None,
-        //msg_body: Some(MessageBody::Bytes(b"mohyatarou\r\n")),
+        //msg_body: None,
+        msg_body: Some(MessageBody::Bytes(b"mohyatarou\r\n")),
     };
 
     /* リクエストライン・リクエストヘッダの読み込み */
@@ -69,10 +69,11 @@ fn http(stream: &TcpStream) -> Result<(), io::Error> { // 引数には参照を�
     // method ごとに処理を呼び出す
     match method {
         "GET" => {
-            status_code = get(&mut bufw, &uri).expect("GET operaton error");
+            // ヘッダ生成まではHEADと同じ
+            status_code = head(&mut bufw, &method, &uri).expect("GET operaton error");
         },
         "HEAD" => {
-            status_code = head(&mut bufw, &uri).expect("HEAD operaton error");
+            status_code = head(&mut bufw, &method, &uri).expect("HEAD operaton error");
         },
         "poyo" => {
             send_response(&mut bufw, resp400)?;
@@ -90,9 +91,9 @@ fn http(stream: &TcpStream) -> Result<(), io::Error> { // 引数には参照を�
 fn send_response(bufw: &mut BufWriter<&TcpStream>, resp: Response) -> Result<(), io::Error> {
     println!("{:?}", str::from_utf8(resp.resp_line));
     bufw.write(resp.resp_line)?;
-    if let Some(hdr) = resp.resp_hdr {
-        for x in hdr {
-            bufw.write(x)?;
+    if let Some(vec) = resp.resp_hdr {
+        for hdr in vec {
+            bufw.write(hdr)?;
         }
     }
     if let Some(MessageBody::Bytes(body)) = resp.msg_body {
@@ -124,71 +125,7 @@ fn send_file(bufw: &mut BufWriter<&TcpStream>, uri: &str) -> Result<(), io::Erro
     Ok(())
 }
 
-fn get(bufw: &mut BufWriter<&TcpStream>, uri: &str) -> Result<u16, io::Error> {
-    let mut resp = Response {
-        resp_line: b"status line shold be here",
-        resp_hdr: None,
-        msg_body: None,
-    };
-    let mut header: Vec<&[u8]> = Vec::new();
-    let status_code: u16;
-    let file_uri: &str;
-
-    if uri == "/" {
-        file_uri = "index.html";
-    } else {
-        file_uri = uri.trim_start_matches("/");
-    }
-
-    /* check file existance */
-    let path = Path::new(file_uri);
-    if !path.exists() {
-        resp.resp_line = b"HTTP/1.1 404 Not Found\r\n";
-        status_code = 404;
-        send_response(bufw, resp)?;
-        return Ok(status_code);
-    }
-    let attr = path.metadata()?;
-    if !attr.is_file() {
-        /* 404 */
-        resp.resp_line = b"HTTP/1.1 404 Not Found\r\n";
-        status_code = 404;
-    } else if attr.permissions().readonly() {
-        /* 403 */
-        resp.resp_line = b"HTTP/1.1 403 Forbidden\r\n";
-        status_code = 403;
-    } else {
-        /* 200 */
-        resp.resp_line = b"HTTP/1.1 200 OK\r\n";
-        status_code = 200;
-    }
-
-    if status_code == 200 {
-        /* detect content-type */
-        let content_type: &[u8];
-        match path.extension().and_then(OsStr::to_str) {
-            Some("html") =>
-                content_type = b"Content-Type: text/html\r\n",
-            Some("png") | Some("ico") =>
-                content_type = b"Content-Type: image/png\r\n",
-            Some("jpg") | Some("jpeg") =>
-                content_type = b"Content-Type: image/jpeg\r\n",
-            Some("txt") =>
-                content_type = b"Content-Type: text/plain\r\n",
-            _ =>
-                content_type = b"Content-Type: application/octet-stream\r\n",
-        }
-        header.push(content_type);
-        
-        resp.msg_body = Some(MessageBody::Uri(file_uri));
-    }
-    resp.resp_hdr = Some(header);
-    send_response(bufw, resp)?;
-
-    Ok(status_code)
-}
-
-fn head(bufw: &mut BufWriter<&TcpStream>, uri: &str) -> Result<u16, io::Error> {
+fn head(bufw: &mut BufWriter<&TcpStream>, method: &str, uri: &str) -> Result<u16, io::Error> {
     let mut resp = Response {
         resp_line: b"status line shold be here",
         resp_hdr: None,
@@ -245,7 +182,18 @@ fn head(bufw: &mut BufWriter<&TcpStream>, uri: &str) -> Result<u16, io::Error> {
         header.push(content_type);
     }
     resp.resp_hdr = Some(header);
-    send_response(bufw, resp)?;
+
+    /* status_codeが決まった後, method ごとに処理を呼び出す */
+    match method {
+        "GET" => {
+            if status_code == 200 {
+                resp.msg_body = Some(MessageBody::Uri(file_uri));
+            }
+            send_response(bufw, resp)?;
+        },
+        "HEAD" => send_response(bufw, resp)?,
+        _ => return Err(Error::new(ErrorKind::Other, "Unknown method")),
+    }
 
     Ok(status_code)
 }
