@@ -17,9 +17,16 @@ enum MessageBody <'a> {
     Uri(&'a str),
 }
 
+struct RequestLine <'a> {
+    method: &'a str,
+    uri: &'a str,
+    version: &'a str,
+}
+
 fn http(stream: &TcpStream) -> Result<(), io::Error> { // 引数には参照を渡す
     let mut bufr = io::BufReader::new(stream);
     let mut bufw = io::BufWriter::new(stream);
+    let rl: RequestLine;
     let status_code: u16;
     let resp400 = Response {
         resp_line: b"HTTP/1.1 400 Bad Request\r\n",
@@ -41,39 +48,31 @@ fn http(stream: &TcpStream) -> Result<(), io::Error> { // 引数には参照を�
     println!("{:?}", header);
 
     /* リクエストラインのチェック */
-    let mut params = header[0].split_whitespace();
-    let method: &str;
-    let uri: &str;
-    let version: &str;
-    if let Some(x) = params.next() {
-        method = x;
-    } else {
-        send_response(&mut bufw, resp400)?;
-        return Ok(());
-    }
-    if let Some(x) = params.next() {
-        uri = x;
-    } else {
-        send_response(&mut bufw, resp400)?;
-        return Ok(());
-    }
-    if let Some(x) = params.next() {
-        version = x;
-    } else {
-        send_response(&mut bufw, resp400)?;
-        return Ok(());
+    match check_req_line(&mut bufw, &header[0]) {
+        Ok(x) => rl = x,
+        Err(x) => {
+            println!("{:?}", x);
+            return Ok(());
+        },
     }
 
     /* TODO: メッセージボディの読み込み */
 
     // method ごとに処理を呼び出す
-    match method {
+    match rl.method {
         "GET" => {
             // ヘッダ生成まではHEADと同じ
-            status_code = head(&mut bufw, &method, &uri).expect("GET operaton error");
+            //status_code = head(&mut bufw, &rl.method, &rl.uri).expect("GET operaton error");
+            match head(&mut bufw, &rl.method, &rl.uri) {
+                Ok(x) => status_code = x,
+                Err(x) => {
+                    println!("{:?}", x);
+                    return Ok(());
+                },
+            }
         },
         "HEAD" => {
-            status_code = head(&mut bufw, &method, &uri).expect("HEAD operaton error");
+            status_code = head(&mut bufw, &rl.method, &rl.uri).expect("HEAD operaton error");
         },
         "poyo" => {
             send_response(&mut bufw, resp400)?;
@@ -86,6 +85,30 @@ fn http(stream: &TcpStream) -> Result<(), io::Error> { // 引数には参照を�
     }
     println!("{}", status_code);
     Ok(())
+}
+
+/* リクエストラインのチェック */
+fn check_req_line<'a>(bufw: &mut BufWriter<&TcpStream>, req_line: &'a str)
+    -> Result<RequestLine<'a>, io::Error> { // ライフタイムは謎
+    let params: Vec<&str> = req_line.split_whitespace().collect();
+    let req: RequestLine;
+    let resp400 = Response {
+        resp_line: b"HTTP/1.1 400 Bad Request\r\n",
+        resp_hdr: None,
+        msg_body: None,
+    };
+
+    if params.len() == 3 {
+        req = RequestLine {
+            method: params[0],
+            uri: params[1],
+            version: params[2],
+        };
+    } else {
+        send_response(bufw, resp400)?;
+        return Err(io::Error::new(ErrorKind::Other, "invalid request line"));
+    }
+    Ok(req)
 }
 
 fn send_response(bufw: &mut BufWriter<&TcpStream>, resp: Response) -> Result<(), io::Error> {
@@ -125,7 +148,7 @@ fn send_file(bufw: &mut BufWriter<&TcpStream>, uri: &str) -> Result<(), io::Erro
     Ok(())
 }
 
-fn head(bufw: &mut BufWriter<&TcpStream>, method: &str, uri: &str) -> Result<u16, io::Error> {
+fn head(bufw: &mut BufWriter<&TcpStream>, method: &str, query_uri: &str) -> Result<u16, io::Error> {
     let mut resp = Response {
         resp_line: b"status line shold be here",
         resp_hdr: None,
@@ -134,12 +157,48 @@ fn head(bufw: &mut BufWriter<&TcpStream>, method: &str, uri: &str) -> Result<u16
     let mut header: Vec<&[u8]> = Vec::new();
     let status_code: u16;
     let file_uri: &str;
+    let mut query: Vec<(&str, &str)> = Vec::new();
 
-    if uri == "/" {
-        file_uri = "index.html";
-    } else {
-        file_uri = uri.trim_start_matches("/");
+    let uq: Vec::<&str> = query_uri.split("?").collect();
+    match uq.len() {
+        1 => {
+            let uri: &str = uq[0];
+            if uri == "/" {
+                file_uri = "index.html";
+            } else {
+                file_uri = uri.trim_start_matches("/");
+            }
+        },
+        2 => {
+            let (uri, qry): (&str, &str) = (uq[0], uq[1]);
+            if uri == "/" {
+                file_uri = "index.html";
+            } else {
+                file_uri = uri.trim_start_matches("/");
+            }
+            /* クエリの変数名と値を格納 */
+            for pair in qry.split("&") {
+                let q: Vec<&str> = pair.split("=").collect();
+                if q.len() == 2 {
+                    query.push((q[0], q[1]));
+                } else {
+                    resp.resp_line = b"HTTP/1.1 400 Bad Request\r\n";
+                    //status_code = 400;
+                    send_response(bufw, resp)?;
+                    return Err(Error::new(ErrorKind::Other, "invalid query"));
+                    //return Ok(status_code);
+                }
+            }
+        },
+        _ => {
+            resp.resp_line = b"HTTP/1.1 400 Bad Request\r\n";
+            //status_code = 400;
+            send_response(bufw, resp)?;
+            return Err(Error::new(ErrorKind::Other, "invalid query_uri"));
+            //return Ok(status_code);
+        },
     }
+    println!("{:?}", query);
 
     /* check file existance */
     let path = Path::new(file_uri);
