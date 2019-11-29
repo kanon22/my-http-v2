@@ -1,10 +1,60 @@
-use std::io::{self, BufRead, BufWriter, Read, Write, Error, ErrorKind};
+//use std::io::{self, BufRead, BufWriter, Read, Write, Error, ErrorKind};
+use std::io::{self, BufRead, BufWriter, Read, Write, ErrorKind};
+use std::io::Error as IoError;
+use std::error::Error;
+use std::fmt;
 use std::str;
+use std::string::String;
+use std::num;
 use std::fs::File;
 use std::path::Path;
 use std::ffi::OsStr;
 use std::env;
 use std::net::{TcpListener, TcpStream};
+
+const BUF_SIZE: usize = 4;
+
+/* 独自のエラー型を定義 */
+#[derive(Debug)]
+enum HTTPError {
+    Io(io::Error),
+    Parse(num::ParseIntError),
+}
+
+/* Display トレイトを実装 */
+impl fmt::Display for HTTPError {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match *self {
+            HTTPError::Io(ref err) => write!(f, "IO error: {}", err),
+            HTTPError::Parse(ref err) => write!(f, "Parse error: {}", err),
+        }
+    }
+}
+
+/* Error トレイトを実装 */
+impl Error for HTTPError {
+    fn description(&self) -> &str {
+        match *self {
+            HTTPError::Io(ref err) => err.description(),
+            HTTPError::Parse(ref err) => err.description(),
+        }
+    }
+    // エラーが発生した lower-levelの原因をcauseに任意で実装できる
+    //fn cause(&self) -> Option<&Error>
+}
+
+/* From トレイトを実装 */
+impl From<io::Error> for HTTPError {
+    fn from(err: io::Error) -> HTTPError {
+        HTTPError::Io(err)
+    }
+}
+
+impl From<num::ParseIntError> for HTTPError {
+    fn from(err: num::ParseIntError) -> HTTPError {
+        HTTPError::Parse(err)
+    }
+}
 
 struct Response <'a> {
     resp_line: &'a [u8],
@@ -23,7 +73,8 @@ struct RequestLine <'a> {
     version: &'a str,
 }
 
-fn http(stream: &TcpStream) -> Result<(), io::Error> { // 引数には参照を渡す
+//fn http(stream: &TcpStream) -> Result<(), io::Error> { // 引数には参照を渡す
+fn http(stream: &TcpStream) -> Result<(), HTTPError> { // 引数には参照を渡す
     let mut bufr = io::BufReader::new(stream);
     let mut bufw = io::BufWriter::new(stream);
     let rl: RequestLine;
@@ -31,32 +82,139 @@ fn http(stream: &TcpStream) -> Result<(), io::Error> { // 引数には参照を�
     let resp400 = Response {
         resp_line: b"HTTP/1.1 400 Bad Request\r\n",
         resp_hdr: None,
-        //msg_body: None,
-        msg_body: Some(MessageBody::Bytes(b"mohyatarou\r\n")),
+        msg_body: None,
+    };
+    let resp405 = Response {
+        resp_line: b"HTTP/1.1 405 Method Not Allowed\r\n",
+        resp_hdr: Some(vec!(b"Allow: GET, HEAD")),
+        msg_body: None,
+    };
+    let resp411 = Response {
+        resp_line: b"HTTP/1.1 411 Length Required\r\n",
+        resp_hdr: None,
+        msg_body: None,
+    };
+    let resp501 = Response {
+        resp_line: b"HTTP/1.1 501 Not Implementend\r\n",
+        resp_hdr: None,
+        msg_body: None,
     };
 
     /* リクエストライン・リクエストヘッダの読み込み */
     let mut line = String::new();
-    let mut header = Vec::new();
+    let mut lines = Vec::new();
     while bufr.read_line(&mut line)? != 0 {
         if line == "\r\n" {
             break;
         }
-        header.push(line);
+        lines.push(line);
         line = String::new();
     }
-    println!("{:?}", header);
+    println!("{:?}", lines);
 
     /* リクエストラインのチェック */
-    match check_req_line(&mut bufw, &header[0]) {
+    //match check_req_line(&mut bufw, &lines[0]) {
+    match check_req_line(&lines[0]) {
         Ok(x) => rl = x,
         Err(x) => {
             println!("{:?}", x);
+            send_response(&mut bufw, resp400)?;
             return Ok(());
         },
     }
 
-    /* TODO: メッセージボディの読み込み */
+    /* ヘッダのチェック */
+    let mut header: Vec<Vec<&str>> = Vec::new();
+    for hdr in &lines[1..] {
+        header.push(hdr.trim_end_matches("\r\n")
+                    .splitn(2, ":").map(|x| x.trim()).collect());
+    }
+    //println!("{:?}", header);
+
+    if let Some(hdr) = header.iter().find(|hdr| hdr[0] == "Content-Length") {
+        let content_length: usize = hdr[1].parse()?;
+        println!("content_length: {}", content_length);
+
+        /* TODO: メッセージボディの読み込み */
+        /*
+           let mut lines = Vec::new();
+           let mut nread: usize = 0;
+           while nread < content_length {
+           println!("step into loop");
+        /*
+        if nread >= content_length {
+        break;
+        }
+        */
+        line = String::new();
+        match bufr.read_line(&mut line) {
+            Ok(0) => {
+                println!("nread: {}", nread);
+                break;
+            },
+            Ok(n) => {
+                lines.push(line);
+                nread += n;
+                println!("nread: {}", nread);
+            },
+            Err(e) => {
+                return Err(HTTPError::Io(e));
+            },
+        }
+    }
+    println!("lines: {:?}", lines);
+    */
+    /*
+    let mut msg_body = Vec::new();
+    let mut buf = [0; BUF_SIZE];
+    let mut nread: usize = 0;
+    loop {
+        //buf.clear();
+        println!("nread: {}", nread);
+        if nread >= content_length {
+            break;
+        }
+        match bufr.read(&mut buf)? {
+            n if n < BUF_SIZE => { // bufferの終わり
+                //let chunk = &buf[..n];
+                let buf = &buf[..n];
+                println!("{:?}", buf);
+                nread += n;
+                //msg_body.push(chunk);
+                msg_body.push(buf);
+                break;
+            },
+            n => {
+                let buf = &buf[..n];
+                println!("{:?}", buf);
+                msg_body.push(buf);
+                nread += n;
+            },
+        };
+    }
+    */
+    let mut msg_body: Vec<u8> = Vec::with_capacity(content_length);
+    //bufr.read_to_end(&mut msg_body)?;
+    bufr.read_exact(&mut msg_body)?;
+
+    println!("msg_body: {:?}", msg_body);
+    println!("capacity: {:?}", msg_body.capacity());
+
+    /*
+    //let mut buf: [u8; BUF_SIZE];
+    let mut buf: [u8; BUF_SIZE] = [0; BUF_SIZE];
+    // handle: 最大でcontent_length文字読み込むアダプタ
+    //let mut handle = stream.take(content_length);
+    let n = bufr.lines();
+        println!("buf: {:?}", buf);
+        println!("lines: {:?}", n.collect());
+        */
+        //break;
+    } else if rl.method == "POST" {
+        send_response(&mut bufw, resp411)?;
+        //status_code = 411;
+        return Ok(());
+    }
 
     // method ごとに処理を呼び出す
     match rl.method {
@@ -77,10 +235,14 @@ fn http(stream: &TcpStream) -> Result<(), io::Error> { // 引数には参照を�
         "poyo" => {
             send_response(&mut bufw, resp400)?;
             status_code = 400;
-        }
-        _ => {
+        },
+        "OPTIONS" | "POST" | "PUT" | "DELETE" | "TRACE" | "CONNECT" => {
+            send_response(&mut bufw, resp501)?;
             status_code = 501;
-            println!("not implemented.");
+        },
+        _ => {
+            send_response(&mut bufw, resp405)?;
+            status_code = 405;
         },
     }
     println!("{}", status_code);
@@ -88,15 +250,10 @@ fn http(stream: &TcpStream) -> Result<(), io::Error> { // 引数には参照を�
 }
 
 /* リクエストラインのチェック */
-fn check_req_line<'a>(bufw: &mut BufWriter<&TcpStream>, req_line: &'a str)
-    -> Result<RequestLine<'a>, io::Error> { // ライフタイムは謎
+// ライフタイムは謎
+fn check_req_line<'a>(req_line: &'a str) -> Result<RequestLine<'a>, io::Error> {
     let params: Vec<&str> = req_line.split_whitespace().collect();
     let req: RequestLine;
-    let resp400 = Response {
-        resp_line: b"HTTP/1.1 400 Bad Request\r\n",
-        resp_hdr: None,
-        msg_body: None,
-    };
 
     if params.len() == 3 {
         req = RequestLine {
@@ -105,8 +262,7 @@ fn check_req_line<'a>(bufw: &mut BufWriter<&TcpStream>, req_line: &'a str)
             version: params[2],
         };
     } else {
-        send_response(bufw, resp400)?;
-        return Err(io::Error::new(ErrorKind::Other, "invalid request line"));
+        return Err(IoError::new(ErrorKind::Other, "invalid request line"));
     }
     Ok(req)
 }
@@ -119,13 +275,13 @@ fn send_response(bufw: &mut BufWriter<&TcpStream>, resp: Response) -> Result<(),
             bufw.write(hdr)?;
         }
     }
+    bufw.write(b"\r\n")?;
     if let Some(MessageBody::Bytes(body)) = resp.msg_body {
-        bufw.write(b"\r\n")?;
+        //bufw.write(b"\r\n")?;
         bufw.write(body)?;
     } else if let Some(MessageBody::Uri(uri)) = resp.msg_body {
         send_file(bufw, uri)?;
     }
-    bufw.write(b"\r\n")?;
     bufw.flush()?;
     Ok(())
 }
@@ -134,7 +290,7 @@ fn send_file(bufw: &mut BufWriter<&TcpStream>, uri: &str) -> Result<(), io::Erro
     let mut buf = [0; 1024];
     let mut reader = io::BufReader::new(File::open(uri)?);
 
-    bufw.write(b"\r\n")?;
+    //bufw.write(b"\r\n")?;
     loop {
         match reader.read(&mut buf)? {
             0 => break,
@@ -183,19 +339,16 @@ fn head(bufw: &mut BufWriter<&TcpStream>, method: &str, query_uri: &str) -> Resu
                     query.push((q[0], q[1]));
                 } else {
                     resp.resp_line = b"HTTP/1.1 400 Bad Request\r\n";
-                    //status_code = 400;
                     send_response(bufw, resp)?;
-                    return Err(Error::new(ErrorKind::Other, "invalid query"));
-                    //return Ok(status_code);
+                    //return Err(Error::new(ErrorKind::Other, "invalid query"));
+                    return Err(IoError::new(ErrorKind::Other, "invalid query"));
                 }
             }
         },
         _ => {
             resp.resp_line = b"HTTP/1.1 400 Bad Request\r\n";
-            //status_code = 400;
             send_response(bufw, resp)?;
-            return Err(Error::new(ErrorKind::Other, "invalid query_uri"));
-            //return Ok(status_code);
+            return Err(IoError::new(ErrorKind::Other, "invalid query_uri"));
         },
     }
     println!("{:?}", query);
@@ -251,13 +404,14 @@ fn head(bufw: &mut BufWriter<&TcpStream>, method: &str, query_uri: &str) -> Resu
             send_response(bufw, resp)?;
         },
         "HEAD" => send_response(bufw, resp)?,
-        _ => return Err(Error::new(ErrorKind::Other, "Unknown method")),
+        _ => return Err(IoError::new(ErrorKind::Other, "Unknown method")),
     }
 
     Ok(status_code)
 }
 
-fn start_srv(portnum: u16) -> Result<(), io::Error> {
+//fn start_srv(portnum: u16) -> Result<(), io::Error> {
+fn start_srv(portnum: u16) -> Result<(), HTTPError> {
     /* ソケットの作成 */
     let listener = TcpListener::bind(format!("127.0.0.1:{}", portnum))?;
     /* connection を accept して並列に処理したい */
