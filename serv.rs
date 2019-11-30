@@ -113,7 +113,6 @@ fn http(stream: &TcpStream) -> Result<(), HTTPError> { // 引数には参照を�
     println!("{:?}", lines);
 
     /* リクエストラインのチェック */
-    //match check_req_line(&mut bufw, &lines[0]) {
     match check_req_line(&lines[0]) {
         Ok(x) => rl = x,
         Err(x) => {
@@ -131,89 +130,30 @@ fn http(stream: &TcpStream) -> Result<(), HTTPError> { // 引数には参照を�
     }
     //println!("{:?}", header);
 
-    if let Some(hdr) = header.iter().find(|hdr| hdr[0] == "Content-Length") {
-        let content_length: usize = hdr[1].parse()?;
-        println!("content_length: {}", content_length);
+    if rl.method == "POST" {
+        if let Some(hdr) = header.iter().find(|hdr| hdr[0] == "Content-Length") {
+            let content_length: usize = hdr[1].parse()?;
+            println!("content_length: {}", content_length);
 
-        /* TODO: メッセージボディの読み込み */
-        /*
-           let mut lines = Vec::new();
-           let mut nread: usize = 0;
-           while nread < content_length {
-           println!("step into loop");
-        /*
-        if nread >= content_length {
-        break;
-        }
-        */
-        line = String::new();
-        match bufr.read_line(&mut line) {
-            Ok(0) => {
-                println!("nread: {}", nread);
-                break;
-            },
-            Ok(n) => {
-                lines.push(line);
-                nread += n;
-                println!("nread: {}", nread);
-            },
-            Err(e) => {
-                return Err(HTTPError::Io(e));
-            },
-        }
-    }
-    println!("lines: {:?}", lines);
-    */
-    /*
-    let mut msg_body = Vec::new();
-    let mut buf = [0; BUF_SIZE];
-    let mut nread: usize = 0;
-    loop {
-        //buf.clear();
-        println!("nread: {}", nread);
-        if nread >= content_length {
-            break;
-        }
-        match bufr.read(&mut buf)? {
-            n if n < BUF_SIZE => { // bufferの終わり
-                //let chunk = &buf[..n];
-                let buf = &buf[..n];
-                println!("{:?}", buf);
-                nread += n;
-                //msg_body.push(chunk);
-                msg_body.push(buf);
-                break;
-            },
-            n => {
-                let buf = &buf[..n];
-                println!("{:?}", buf);
-                msg_body.push(buf);
-                nread += n;
-            },
-        };
-    }
-    */
-    let mut msg_body: Vec<u8> = Vec::with_capacity(content_length);
-    //bufr.read_to_end(&mut msg_body)?;
-    bufr.read_exact(&mut msg_body)?;
+            /* TODO: メッセージボディの読み込み */
+            let msg_body = bufr.fill_buf().unwrap();
+            let bodylen: usize = msg_body.len();
+            println!("msg_body: {:?}", msg_body);
+            if bodylen != content_length {
+                bufr.consume(bodylen);
+                send_response(&mut bufw, resp400)?;
+                return Ok(());
+            }
+            if let Ok(params) = str::from_utf8(msg_body) {
+                println!("params: {}", params);
+            }
+            bufr.consume(bodylen);
 
-    println!("msg_body: {:?}", msg_body);
-    println!("capacity: {:?}", msg_body.capacity());
-
-    /*
-    //let mut buf: [u8; BUF_SIZE];
-    let mut buf: [u8; BUF_SIZE] = [0; BUF_SIZE];
-    // handle: 最大でcontent_length文字読み込むアダプタ
-    //let mut handle = stream.take(content_length);
-    let n = bufr.lines();
-        println!("buf: {:?}", buf);
-        println!("lines: {:?}", n.collect());
-        */
-        //break;
-    } else if rl.method == "POST" {
-        send_response(&mut bufw, resp411)?;
-        //status_code = 411;
-        return Ok(());
+        } else {
+            send_response(&mut bufw, resp411)?;
+            //status_code = 411;
+            return Ok(());
+        }
     }
 
     // method ごとに処理を呼び出す
